@@ -356,11 +356,6 @@ class Decider:
         self._episode_rewards:  List[float] = []
         self._episode_total= 0.0
 
-        # Warm-up
-        self._warm_up_start_time: Optional[float] = None
-        self._warm_up_duration = FIRST_ROUND_WAIT_SECONDS
-        self._first_call = True  # Track first call for UDP trigger
-
         # Random phases
         self._random_phases = self._load_random_phases(RANDOM_PHASES_PATH)
         self._random_phase_idx = 0
@@ -390,14 +385,17 @@ class Decider:
         Returns:
             Dictionary containing processing configuration parameters
         """
-        if self._warm_up_start_time is None:
-            self._warm_up_start_time = time.time()
-            print(f"Warm-up period started: {self.warm_up_duration} seconds")
-
         return {
             # Data configuration
             'sample_window': [-self.buffer_size_seconds, 0],
-            
+            'warm_up_rounds': 0,  # Number of warm-up rounds to perform (0 to disable)
+
+            # Events
+            'pulse_processor': {
+                'processor': self.process_pulse,
+                'sample_window': [0.0, 0.5]  # Custom window for pulse events
+            },
+
             # Periodic processing
             'periodic_processing_enabled': True,
             'periodic_processing_interval': self.processing_interval_seconds,
@@ -425,19 +423,6 @@ class Decider:
                 writer.writerow([p])
         print(f"[Decider] Generated and saved {len(phases)} random phases to {path}")
         return phases
-
-    def _send_udp_marker(self) -> None:
-        host = os.environ.get("UDP_TRIGGER_HOST", "192.168.2.27")
-        port = int(os.environ.get("UDP_TRIGGER_PORT", "5555"))
-        msg  = os.environ.get("UDP_TRIGGER_MESSAGE", "rl_decider_start")
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            sock.settimeout(1.0)
-            sock.sendto(msg.encode(), (host, port))
-            sock.close()
-            print(f"[Decider] UDP marker sent → {host}:{port}  msg='{msg}'")
-        except Exception as exc:
-            print(f"[Decider] UDP marker failed: {exc}")
 
     def _save_all(self) -> None:
         """Save agent weights and trial log at end of each block / session."""
@@ -469,20 +454,11 @@ class Decider:
                     writer.writerow([i, r])
             print(f"[Decider] Episode rewards saved → {ep_path}")
 
-
-    #def handle_pulse(self, *args, **kwargs) -> None:
-        #"""
-        #Called by NeuroSimo after each delivered TMS pulse.
-        #Override or extend to extract MEP from EMG if available here;
-        #otherwise the external pipeline should call receive_mep() directly.
-        #"""
-        #pass
-
     # changed from PHASTIMATE (LAVA_NEUROSIMO)
     # adapted for RL with feedback loop from MEP
     def process_periodic(
             self, reference_time: float, reference_index: int, time_offsets: np.ndarray,
-            eeg_buffer: np.ndarray, emg_buffer: np.ndarray, is_coil_at_target: bool) -> dict[str, Any] | None:
+            eeg_buffer: np.ndarray, emg_buffer: np.ndarray, is_coil_at_target: bool, is_warm_up: bool) -> dict[str, Any] | None:
         """
         Called every `processing_interval_seconds`.
         Steps:
@@ -495,24 +471,7 @@ class Decider:
           7. Find trigger timing
           8. If trigger found, log and store pending RL experience
         """
-
-        # 1. Warm-up guard 
-        if self._warm_up_start_time is not None:
-            if time.time() - self._warm_up_start_time < self._warm_up_duration:
-                return None
-            # Warm-up just finished
-            self._warm_up_start_time = None
-            print("Warm-up period completed")
-
-        # 2. UDP start marker (once)
-        if self._first_call:
-            self._send_udp_marker() # call external function for UDP
-            self._first_call = False
-
-        # 3. Drain MEP queue (completes the previous trial's RL experience)
-        self._consume_pending_mep()
-
-        # 4. Check block completion
+        # 1. Check block completion
         current_block = self._blocks[self._block_idx]
         if self._block_trials >= current_block["n_trials"]:
             advanced = self._advance_block()
@@ -522,24 +481,24 @@ class Decider:
 
         mode = current_block["mode"]
 
-        # 5. Run Phastimate
+        # 2. Run Phastimate
         estimated_phases = self._run_phastimate(eeg_buffer)
         if estimated_phases is None:
             return None
 
-        # 6. Select target phase
+        # 3. Select target phase
         target_phase = self._select_target_phase(mode, estimated_phases)
         if target_phase is None:
             return None
 
-        # 7. Find trigger timing
+        # 4. Find trigger timing
         trigger_result = self._find_optimal_trigger_timing(
             estimated_phases, reference_time, target_phase
         )
         if trigger_result is None:
             return None
 
-        # 8. Log and store pending RL experience
+        # 5. Log and store pending RL experience
         self._block_trials  += 1
         self._total_trials  += 1
 
@@ -565,18 +524,6 @@ class Decider:
         )
 
         return trigger_result
-
-    # ------------------------------------------------------------------ #
-    #  MEP 
-    # ------------------------------------------------------------------ #
-
-    def receive_mep(self, amplitude_uv: float) -> None:
-        """
-        External EMG pipeline calls this after extracting the peak-to-peak
-        MEP amplitude (µV) from the EMG window following a TMS pulse.
-        Enqueues the MEP; the next process_periodic call will consume it.
-        """
-        self._mep_queue.append(float(amplitude_uv))
 
     # ------------------------------------------------------------------ #
     #  Phastimate pipeline (unchanged from base code) 
@@ -779,74 +726,75 @@ class Decider:
         return {'timed_trigger': reference_time + time_offset}
 
     # ------------------------------------------------------------------ #
-    #  Internal: MEP & reward processing                                  #
+    #  MEP & reward processing                                           #
     # ------------------------------------------------------------------ #
 
-    def _consume_pending_mep(self) -> None:
+    def process_pulse(self, reference_time: float, reference_index: int, time_offsets: np.ndarray,
+            eeg_buffer: np.ndarray, emg_buffer: np.ndarray, is_coil_at_target: bool) -> dict[str, Any] | None:
         """
-        Drain the MEP queue.  For each MEP value:
+        For each MEP buffer:
           1. Append to MEP history and compute reward.
           2. Fill in the most recent unfilled log entry.
           3. If in RL block and a pending experience exists, build the
              next-state observation sequence and push to replay, then
              run one gradient step and decay epsilon.
         """
-        while self._mep_queue:
-            mep = self._mep_queue.popleft()
-            self._last_mep = mep
-            self._mep_history.append(mep)
+        mep = eeg_buffer[:, 0]  # TODO: Check the exact index for EMG channel, CHANGE BACK TO EMG_BUFFER
 
-            reward            = self._compute_reward(mep)
-            self._last_reward = reward
+        self._last_mep = mep
+        self._mep_history.append(mep)
 
-            # Fill in the most recent log entry that is missing a MEP
-            for entry in reversed(self._log):
-                if entry["mep"] is None:
-                    entry["mep"]    = mep
-                    entry["reward"] = reward
-                    break
+        reward            = self._compute_reward(mep)
+        self._last_reward = reward
 
-            # RL training step (only in block 0, and only if a pending experience exists)
-            if (
-                self._block_idx == 0
-                and self._pending_obs    is not None
-                and self._pending_action is not None
-                and self._pending_obs_seq is not None
-            ):
-                # Build next_obs and next_obs_seq
-                next_obs = np.array([
-                    ACTION_TO_PHASE.get(self._pending_action, 0.0),
-                    mep,
-                ])
-                next_window = deque(
-                    list(self._pending_obs_seq), maxlen=SEQUENCE_LENGTH
+        # Fill in the most recent log entry that is missing a MEP
+        for entry in reversed(self._log):
+            if entry["mep"] is None:
+                entry["mep"]    = mep
+                entry["reward"] = reward
+                break
+
+        # RL training step (only in block 0, and only if a pending experience exists)
+        if (
+            self._block_idx == 0
+            and self._pending_obs    is not None
+            and self._pending_action is not None
+            and self._pending_obs_seq is not None
+        ):
+            # Build next_obs and next_obs_seq
+            next_obs = np.array([
+                ACTION_TO_PHASE.get(self._pending_action, 0.0),
+                mep,
+            ])
+            next_window = deque(
+                list(self._pending_obs_seq), maxlen=SEQUENCE_LENGTH
+            )
+            next_window.append(next_obs)
+            next_obs_seq = np.array(list(next_window))
+
+            done = (self._block_trials >= self._blocks[0]["n_trials"])
+
+            loss = self._agent.store_and_train(
+                obs_seq = self._pending_obs_seq,
+                action = self._pending_action,
+                reward = reward,
+                next_obs_seq = next_obs_seq,
+                done = done,
+            )
+
+            self._agent.decay_epsilon()
+            self._check_episode_boundary()
+
+            if loss is not None:
+                print(
+                    f"[RL] loss={loss:.4f} | MEP={mep:.1f}µV | "
+                    f"reward={reward:.2f} | ε={self._agent.epsilon:.3f}"
                 )
-                next_window.append(next_obs)
-                next_obs_seq = np.array(list(next_window))
 
-                done = (self._block_trials >= self._blocks[0]["n_trials"])
-
-                loss = self._agent.store_and_train(
-                    obs_seq = self._pending_obs_seq,
-                    action = self._pending_action,
-                    reward = reward,
-                    next_obs_seq = next_obs_seq,
-                    done = done,
-                )
-
-                self._agent.decay_epsilon()
-                self._check_episode_boundary()
-
-                if loss is not None:
-                    print(
-                        f"[RL] loss={loss:.4f} | MEP={mep:.1f}µV | "
-                        f"reward={reward:.2f} | ε={self._agent.epsilon:.3f}"
-                    )
-
-            # Clear pending regardless of block (avoids stale data)
-            self._pending_obs     = None
-            self._pending_action  = None
-            self._pending_obs_seq = None
+        # Clear pending regardless of block (avoids stale data)
+        self._pending_obs     = None
+        self._pending_action  = None
+        self._pending_obs_seq = None
 
     def _compute_reward(self, current_mep: float) -> float:
         """
