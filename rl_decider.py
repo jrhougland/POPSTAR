@@ -67,7 +67,7 @@ N_TEST_TRIALS = 200   # per test block (Trough, then Random)
 
 # --- DQN hyper-parameters (mirrors MATLAB agentOptions) ---
 REPLAY_BUFFER_SIZE = 50
-MINI_BATCH_SIZE = 15
+MINI_BATCH_SIZE = 1
 LEARN_RATE = 1e-3
 GRAD_CLIP = 1.0
 DISCOUNT_FACTOR = 1.0
@@ -209,6 +209,7 @@ class DQNAgent:
         """
         self.replay.push(obs_seq, action - 1, reward, next_obs_seq, done) #save to buffer
         if len(self.replay) < MINI_BATCH_SIZE:
+            print(f"Not enough samples in replay buffer, skipping training")
             return None
         return self._train_step()
 
@@ -444,7 +445,7 @@ class Decider:
             writer.writerows(self._log)
         print(f"[Decider] Trial log saved ({len(self._log)} rows) → {log_path}")
 
-        # Episode rewards summary (RL block)
+        # Episode rewards summary (RL episode)
         if self._episode_rewards:
             ep_path = os.path.join(SAVE_PATH, f"{self.subject_id}_episode_rewards.csv")
             with open(ep_path, "w", newline="") as f:
@@ -739,7 +740,13 @@ class Decider:
              next-state observation sequence and push to replay, then
              run one gradient step and decay epsilon.
         """
-        mep = eeg_buffer[:, 0]  # TODO: Check the exact index for EMG channel, CHANGE BACK TO EMG_BUFFER
+        start_time = time.time()
+
+        print("Processing pulse...")
+        # TODO: - Change back to emg_buffer
+        #       - Check the exact index for EMG channel
+        #       - Check how MEP is calculated
+        mep = np.max(np.abs(eeg_buffer[:, 0]))  # Extract MEP amplitude as peak absolute value from EMG channel
 
         self._last_mep = mep
         self._mep_history.append(mep)
@@ -781,6 +788,7 @@ class Decider:
                 next_obs_seq = next_obs_seq,
                 done = done,
             )
+            print(f"Loss: {loss}")
 
             self._agent.decay_epsilon()
             self._check_episode_boundary()
@@ -795,6 +803,8 @@ class Decider:
         self._pending_obs     = None
         self._pending_action  = None
         self._pending_obs_seq = None
+        
+        print(f"Pulse processed in {time.time() - start_time:.3f} seconds")
 
     def _compute_reward(self, current_mep: float) -> float:
         """
