@@ -34,7 +34,6 @@ from spectrum import aryule
 # ---------------------------------------------------------------------------
 # CONFIGURATION
 # ---------------------------------------------------------------------------
-SUBJECT_ID = "sub-test"
 
 # --- EEG spatial filter (C3 Hjorth) ---
 C3_CHANNEL_INDEX = 4
@@ -50,7 +49,6 @@ DEFAULT_DOWNSAMPLE_RATIO = 10
 # --- Timing ---
 DEFAULT_PROCESSING_INTERVAL_SECONDS = 0.05
 DEFAULT_BUFFER_SIZE_SECONDS = 0.5
-TRIGGER_COOLDOWN_SECONDS = 2.0
 MINIMUM_TRIGGER_DELAY_SECONDS = 0.005
 FIRST_ROUND_WAIT_SECONDS = 0.5
 
@@ -62,21 +60,21 @@ N_ACTIONS = 8
 ACTION_TO_PHASE = {k: (k - 5) * 0.25 * np.pi for k in range(1, N_ACTIONS + 1)}
 
 # --- Session structure ---
-N_RL_TRIALS = 800   # training block
-N_TEST_TRIALS = 200   # per test block (Trough, then Random)
+N_RL_TRIALS = 10
+N_TEST_TRIALS = 10
 
 # --- DQN hyper-parameters (mirrors MATLAB agentOptions) ---
 REPLAY_BUFFER_SIZE = 50
-MINI_BATCH_SIZE = 1
+MINI_BATCH_SIZE = 10
 LEARN_RATE = 1e-3
 GRAD_CLIP = 1.0
 DISCOUNT_FACTOR = 1.0
 TARGET_SMOOTH = 5e-3
 EPSILON_START = 1.0
 EPSILON_MIN = 0.01
-EPSILON_DECAY = 0.005
+EPSILON_DECAY = 0.002 #TODO:!!
 SEQUENCE_LENGTH = 2
-REWARD_CAP = 10.0
+REWARD_CAP = 10000.0
 
 # Load MATLAB filter coefficients
 mat_data = loadmat('data/filter_coeffs.mat')
@@ -223,7 +221,7 @@ class DQNAgent:
                 "online_net": self.online_net.state_dict(), # NN weights
                 "target_net": self.target_net.state_dict(),
                 "optimizer": self.optimizer.state_dict(), # training
-                "epsilon": self.epsilon,
+                #"epsilon": self.epsilon, #remove so we don't store
             },
             path,
         )
@@ -234,7 +232,7 @@ class DQNAgent:
         self.online_net.load_state_dict(ckpt["online_net"])
         self.target_net.load_state_dict(ckpt["target_net"])
         self.optimizer.load_state_dict(ckpt["optimizer"])
-        self.epsilon = ckpt["epsilon"]
+        #self.epsilon = ckpt["epsilon"]
         print(f"[DQNAgent] Loaded from {path}")
 
     def _train_step(self) -> float:
@@ -290,7 +288,7 @@ class Decider:
         decider.receive_mep(amplitude_uV)
     """
 
-    def __init__(self, subject_id: str, num_eeg_channels: int, num_emg_channels: int, sampling_frequency: float):
+    def __init__(self, subject_id: int, num_eeg_channels: int, num_emg_channels: int, sampling_frequency: float):
         """
         Initialize the Decider with parameters and filter design.
         
@@ -301,8 +299,14 @@ class Decider:
             sampling_frequency: Sampling frequency in Hz
         """
         self.sampling_frequency = sampling_frequency
-        self.subject_id = SUBJECT_ID
+        self.subject_id = "test_S" + f"{subject_id:03d}"
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        # Print if GPU is available
+        if self.device.type == "cuda":
+            print("GPU is available, using GPU")
+        else:
+            print("GPU is not available, using CPU")
 
         # Phastimate parameters 
         self.hilbert_window_size = DEFAULT_HILBERT_WINDOW_SIZE
@@ -314,11 +318,15 @@ class Decider:
         self.processing_interval_seconds = DEFAULT_PROCESSING_INTERVAL_SECONDS
         self.buffer_size_seconds = DEFAULT_BUFFER_SIZE_SECONDS
         self.buffer_size_samples = int(self.buffer_size_seconds * sampling_frequency)
-        self.trigger_cooldown_seconds = TRIGGER_COOLDOWN_SECONDS
         print(f"Buffer size in samples: {self.buffer_size_samples}")
 
         # Filter
         self.bandpass_filter_coefficients = BANDPASS_FILTER_COEFFICIENTS
+
+        # NEW!!!!!
+        self._action_counts = np.zeros(N_ACTIONS + 1)  # index 1-8
+        self._action_rewards = np.zeros(N_ACTIONS + 1)  # cumulative reward per action
+        self._best_rl_phase = np.pi
 
         # Phase tolerance
         self.phase_tolerance    = DEFAULT_PHASE_TOLERANCE
@@ -328,7 +336,8 @@ class Decider:
         # Session blocks
         self._blocks = [
             {"name": "RL training", "n_trials": N_RL_TRIALS,   "mode": "rl"},
-            {"name": "Trough test", "n_trials": N_TEST_TRIALS,  "mode": "trough"},
+            #{"name": "Trough test", "n_trials": N_TEST_TRIALS,  "mode": "trough"},
+            {"name": "Best RL phase test", "n_trials": N_TEST_TRIALS, "mode": "best_rl"},
             {"name": "Random test", "n_trials": N_TEST_TRIALS,  "mode": "random"},
         ]
         self._block_idx = 0
@@ -351,7 +360,7 @@ class Decider:
         self._mep_queue: deque = deque()
 
         # RL episode tracking
-        self._steps_per_episode = 40
+        self._steps_per_episode = 20 
         self._episode_step = 0
         self._episode_num = 0
         self._episode_rewards:  List[float] = []
@@ -365,13 +374,14 @@ class Decider:
         self._log: List[Dict] = []
 
         # Load saved agent checkpoint if available
-        agent_path = os.path.join(SAVE_PATH, f"{SUBJECT_ID}_dqn_agent.pt")
+        agent_path = os.path.join(SAVE_PATH, f"{self.subject_id}_dqn_agent.pt")
         if os.path.isfile(agent_path):
             self._agent.load(agent_path)
 
         print(
             f"[Decider] Initialised | device={self.device} | "
-            f"RL trials={N_RL_TRIALS} | Test trials/block={N_TEST_TRIALS}"
+            f"RL trials={N_RL_TRIALS} | Test trials/block={N_TEST_TRIALS} |"
+            f"Subject ID={self.subject_id}"
         )
 
     def __del__(self):
@@ -392,15 +402,10 @@ class Decider:
             'warm_up_rounds': 0,  # Number of warm-up rounds to perform (0 to disable)
 
             # Events
-            'pulse_processor': {
-                'processor': self.process_pulse,
-                'sample_window': [0.0, 0.5]  # Custom window for pulse events
-            },
+            'pulse_sample_window': [0.025, 0.05], # Custom window for pulse events TODO: change??
 
             # Periodic processing
-            'periodic_processing_enabled': True,
             'periodic_processing_interval': self.processing_interval_seconds,
-            'pulse_lockout_duration': self.trigger_cooldown_seconds,
         }
     
     def _load_random_phases(self, path: str) -> np.ndarray:
@@ -459,7 +464,8 @@ class Decider:
     # adapted for RL with feedback loop from MEP
     def process_periodic(
             self, reference_time: float, reference_index: int, time_offsets: np.ndarray,
-            eeg_buffer: np.ndarray, emg_buffer: np.ndarray, is_coil_at_target: bool, is_warm_up: bool) -> dict[str, Any] | None:
+            eeg_buffer: np.ndarray, emg_buffer: np.ndarray,
+            is_coil_at_target: bool, stage_name: str, trial_in_stage: int, is_warm_up: bool) -> dict[str, Any] | None:
         """
         Called every `processing_interval_seconds`.
         Steps:
@@ -472,14 +478,11 @@ class Decider:
           7. Find trigger timing
           8. If trigger found, log and store pending RL experience
         """
-        # 1. Check block completion
+        # Guard: session is over
+        if self._block_idx >= len(self._blocks):
+            return None
+        # 1. Get current block
         current_block = self._blocks[self._block_idx]
-        if self._block_trials >= current_block["n_trials"]:
-            advanced = self._advance_block()
-            if not advanced:
-                return None   # session finished
-            current_block = self._blocks[self._block_idx]
-
         mode = current_block["mode"]
 
         # 2. Run Phastimate
@@ -510,7 +513,7 @@ class Decider:
             "trial":        self._block_trials,
             "total_trial":  self._total_trials,
             "target_phase": target_phase,
-            "trigger_time": trigger_result["timed_trigger"],
+            "trigger_time": trigger_result["trigger_offset"] + reference_time,
             "mep":          None,   # filled in when MEP arrives
             "reward":       None,
         })
@@ -520,10 +523,9 @@ class Decider:
             f"trial={self._block_trials}/{current_block['n_trials']} "
             f"(global {self._total_trials}) | "
             f"target={np.degrees(target_phase):.1f}° | "
-            f"trigger in {trigger_result['timed_trigger'] - reference_time:.3f}s",
+            f"trigger in {trigger_result['trigger_offset']:.3f}s",
             flush=True,
         )
-
         return trigger_result
 
     # ------------------------------------------------------------------ #
@@ -661,6 +663,9 @@ class Decider:
         """
         if mode == "trough":
             return np.pi
+        
+        if mode == "best_rl":
+            return self._best_rl_phase
 
         if mode == "random":
             idx   = self._random_phase_idx % len(self._random_phases)
@@ -717,21 +722,24 @@ class Decider:
         self.last_phase_error = phase_error
 
         if phase_error > self.phase_tolerance:
+            print("Phase error is too large, skipping trigger")
             return None
 
         time_offset = (best_idx * self.downsample_ratio) / self.sampling_frequency
         if time_offset < MINIMUM_TRIGGER_DELAY_SECONDS:
+            print("Trigger delay is too short, skipping trigger")
             return None
 
         print(f'Trigger scheduled {time_offset:.3f}s from now', flush=True)
-        return {'timed_trigger': reference_time + time_offset}
+        return {'trigger_offset': time_offset}
 
     # ------------------------------------------------------------------ #
     #  MEP & reward processing                                           #
     # ------------------------------------------------------------------ #
 
-    def process_pulse(self, reference_time: float, reference_index: int, time_offsets: np.ndarray,
-            eeg_buffer: np.ndarray, emg_buffer: np.ndarray, is_coil_at_target: bool) -> dict[str, Any] | None:
+    def process_pulse(
+            self, reference_time: float, reference_index: int, time_offsets: np.ndarray,
+            eeg_buffer: np.ndarray, emg_buffer: np.ndarray, is_coil_at_target: bool, stage_name: str, trial_in_stage: int) -> dict[str, Any] | None:
         """
         For each MEP buffer:
           1. Append to MEP history and compute reward.
@@ -743,10 +751,14 @@ class Decider:
         start_time = time.time()
 
         print("Processing pulse...")
-        # TODO: - Change back to emg_buffer
-        #       - Check the exact index for EMG channel
         #       - Check how MEP is calculated
-        mep = np.max(np.abs(eeg_buffer[:, 0]))  # Extract MEP amplitude as peak absolute value from EMG channel
+        #mep = np.max(np.abs(emg_buffer[:, 0]))
+        #mep = np.ptp(emg_buffer[:, 0])
+        #mep = np.max(emg_buffer[:, 0]) - np.min(emg_buffer[:, 0])
+        sample_mask = (time_offsets >= 0.025) & (time_offsets <= 0.05)
+        emg_window = emg_buffer[sample_mask, :]
+        mep = np.ptp(emg_window[:, 0])
+        print(f"EMG buffer shape: {emg_buffer.shape}, time_offsets: min={time_offsets[0]:.4f} max={time_offsets[-1]:.4f}")  
 
         self._last_mep = mep
         self._mep_history.append(mep)
@@ -768,6 +780,8 @@ class Decider:
             and self._pending_action is not None
             and self._pending_obs_seq is not None
         ):
+            self._action_counts[self._pending_action] += 1   # ← move here
+            self._action_rewards[self._pending_action] += reward  # ← move here
             # Build next_obs and next_obs_seq
             next_obs = np.array([
                 ACTION_TO_PHASE.get(self._pending_action, 0.0),
@@ -805,6 +819,12 @@ class Decider:
         self._pending_obs_seq = None
         
         print(f"Pulse processed in {time.time() - start_time:.3f} seconds")
+
+        # Check if block is complete
+        current_block = self._blocks[self._block_idx]
+        if self._block_trials >= current_block["n_trials"]:
+            self._advance_block()
+
 
     def _compute_reward(self, current_mep: float) -> float:
         """
@@ -851,6 +871,17 @@ class Decider:
         self._pending_action   = None
         self._pending_obs_seq  = None
 
+        if self._blocks[self._block_idx - 1]["mode"] == "rl":
+            avg_rewards = np.divide(
+                self._action_rewards[1:],
+                self._action_counts[1:],
+                out=np.zeros(N_ACTIONS),
+                where=self._action_counts[1:] > 0
+            )
+            best_action = int(np.argmax(avg_rewards)) + 1
+            self._best_rl_phase = ACTION_TO_PHASE[best_action]
+            print(f"[Decider] Best RL phase: action={best_action}, phase={np.degrees(self._best_rl_phase):.1f}°")
+
         if self._blocks[self._block_idx]["mode"] == "rl":
             self._agent.reset_episode()
 
@@ -876,6 +907,6 @@ class Decider:
             self._episode_total = 0.0
             self._agent.reset_episode()
 
-            agent_path = os.path.join(SAVE_PATH, f"{SUBJECT_ID}_dqn_agent.pt")
+            agent_path = os.path.join(SAVE_PATH, f"{self.subject_id}_dqn_agent.pt")
             self._agent.save(agent_path)
 

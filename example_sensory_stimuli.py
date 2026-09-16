@@ -19,11 +19,7 @@ class Decider:
             'warm_up_rounds': 2,  # Number of warm-up rounds to perform (0 to disable)
 
             # Periodic processing
-            'periodic_processing_enabled': True,
             'periodic_processing_interval': 2.0,  # Process every 2 seconds
-            
-            # Event system
-            'pulse_processor': self.process_pulse,
             
             # Predefined sensory stimuli (sent at session start)
             'predefined_sensory_stimuli': [
@@ -64,9 +60,9 @@ class Decider:
         }
 
     def process_periodic(
-            self, reference_time: float, reference_index: int, time_offsets: np.ndarray, 
+            self, reference_time: float, reference_index: int, time_offsets: np.ndarray,
             eeg_buffer: np.ndarray, emg_buffer: np.ndarray,
-            is_coil_at_target: bool, is_warm_up: bool) -> dict[str, Any] | None:
+            is_coil_at_target: bool, stage_name: str, trial_in_stage: int, is_warm_up: bool) -> dict[str, Any] | None:
         """Process EEG/EMG buffer periodically."""
         print(f"Periodic processing at time {reference_time:.1f} seconds")
 
@@ -101,8 +97,8 @@ class Decider:
         return None
 
     def process_pulse(
-            self, reference_time: float, reference_index: int, time_offsets: np.ndarray, 
-            eeg_buffer: np.ndarray, emg_buffer: np.ndarray, is_coil_at_target: bool) -> dict[str, Any] | None:
+            self, reference_time: float, reference_index: int, time_offsets: np.ndarray,
+            eeg_buffer: np.ndarray, emg_buffer: np.ndarray, is_coil_at_target: bool, stage_name: str, trial_in_stage: int) -> dict[str, Any] | None:
         """Process pulse event."""
         print(f"Pulse event received at time {reference_time}.")
         

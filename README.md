@@ -9,6 +9,7 @@ The Decider module processes real-time EEG/EMG data and makes decisions about wh
 The `project_template/decider/` directory contains several example decider modules:
 
 - **`example.py`**: Basic periodic processing with event handling
+- **`example_predetermined.py`**: Demonstrates predetermined trial timing with per-trial ITI scheduling
 - **`example_sensory_stimuli.py`**: Demonstrates both predefined and dynamic sensory stimuli
 - **`phastimate.py`**: Real-time phase estimation for brain state-dependent stimulation
 
@@ -22,7 +23,7 @@ The following third-party libraries are currently available in the decider envir
 - statsmodels
 - mneflow
 
-To add more libraries, modify `src/pipeline/decider/Dockerfile` and run `build-neurosimo` from the command line.
+To add more libraries, modify `src/decider/Dockerfile` and run `build-neurosimo` from the command line.
 
 ## Class Methods
 
@@ -42,31 +43,13 @@ Called by the pipeline during initialization. Must return a dictionary with conf
 
 **Return dictionary keys:**
 
-#### `periodic_processing_enabled` (bool)
-Whether periodic processing is enabled. When `False`, the `process_periodic()` method is never called periodically (only events and EEG triggers are processed).
+#### `periodic_processing_interval` (float, optional)
+How frequently the `process_periodic()` method is called, in seconds. Must be greater than `0.0`. Defaults to `0.1` (10 times per second) if not specified.
 
 **Examples:**
-- `True`: Enable periodic processing
-- `False`: Disable periodic processing (event-driven only)
-
-#### `periodic_processing_interval` (float, optional when disabled)
-How frequently the `process_periodic()` method is called, in seconds. Required when `periodic_processing_enabled` is `True`, optional (defaults to `0.0`) when `False`.
-
-**Examples:**
+- `0.1`: Process 10 times per second (default)
 - `1.0`: Process once per second
-- `0.1`: Process 10 times per second
 - `0.01`: Process 100 times per second
-
-**Validation:** When `periodic_processing_enabled` is `True`, this value must be greater than `0.0`.
-
-#### `first_periodic_processing_at` (float, optional)
-Time of the first periodic processing call in seconds (relative to session start). Defaults to `periodic_processing_interval` if not specified.
-
-**Examples:**
-- `1.0`: First processing at 1.0s, then every `periodic_processing_interval`
-- `0.5`: First processing at 0.5s (useful for offset timing)
-
-**Note:** Only relevant when `periodic_processing_enabled` is `True`. This parameter is optional and primarily exists for precise timing control. Most users should omit it and use the default behavior.
 
 #### `sample_window` (list)
 Two-element list `[earliest_seconds, latest_seconds]` defining the buffer size relative to current sample, expressed in **seconds**.
@@ -80,90 +63,32 @@ Two-element list `[earliest_seconds, latest_seconds]` defining the buffer size r
 - `[0.0, 0.0]`: Keep only current sample
 - `[-0.005, 0.005]`: Look 5 ms back and 5 ms ahead (introduces 5 ms delay)
 
-#### `pulse_lockout_duration` (float)
-Duration in seconds during which periodic processing is disabled after a pulse is delivered.
-- Prevents new stimulation during the lockout period
-- Events and EEG triggers are still processed during lockout
-- Set to `0.0` to disable lockout
-
-**Examples:**
-- `2.0`: No periodic processing for 2 seconds after pulse
-- `0.0`: No lockout (periodic processing continues immediately)
-
 #### `predefined_events` (list, optional)
 List of event times (in seconds) for scheduled processing triggers. Can be omitted if no predefined events are needed.
 
 **Format:**
 - Simple list of floats representing event times relative to session start
-- When an event time is reached, the `event_processor` (if configured) is called
+- When an event time is reached, `process_event()` is called (if the method is defined)
 
 **Example:**
 ```python
 'predefined_events': [5.0, 10.0, 15.0]  # Events at 5s, 10s, and 15s
 ```
 
-#### `pulse_processor` (callable or dict, optional)
-Processor method called when a pulse event occurs. Can be omitted if pulse events are not needed.
+#### `pulse_sample_window` (list, optional)
+Custom sample window for `process_pulse()` calls, as a two-element list `[earliest_seconds, latest_seconds]`. If omitted, the default `sample_window` is used.
 
-**Simple format:**
+**Example:**
 ```python
-'pulse_processor': self.process_pulse,
+'pulse_sample_window': [-0.500, 0.100],
 ```
 
-**Advanced format with custom sample window:**
+#### `event_sample_window` (list, optional)
+Custom sample window for `process_event()` calls, as a two-element list `[earliest_seconds, latest_seconds]`. If omitted, the default `sample_window` is used.
+
+**Example:**
 ```python
-'pulse_processor': {
-    'processor': self.process_pulse,
-    'sample_window': [-0.500, 0.100],  # Custom window just for pulse events (seconds)
-}
-```
-
-When a pulse event occurs, the pulse processor is called instead of the regular `process_periodic()` method.
-
-**Example processor method:**
-```python
-def process_pulse(
-        self, reference_time, reference_index, time_offsets, 
-        eeg_buffer, emg_buffer, is_coil_at_target):
-    """Process pulse events."""
-    print(f"Pulse event at {reference_time}")
-    # Process pulse-specific logic
-    return None
-```
-
-#### `event_processor` (callable or dict, optional)
-Processor method called when a general event occurs (from `predefined_events`). Can be omitted if events are not needed.
-
-**Simple format:**
-```python
-'event_processor': self.process_event,
-```
-
-**Advanced format with custom sample window:**
-```python
-'event_processor': {
-    'processor': self.process_event,
-    'sample_window': [-1.5, 0.3],  # Custom window for events (seconds)
-}
-```
-
-When an event occurs, the event processor is called instead of the regular `process_periodic()` method.
-
-**Custom sample windows:**
-- By default, processors use the same `sample_window` as periodic processing
-- You can optionally specify a different window for pulse or event processors
-- Custom windows can be smaller or larger, overlapping or non-overlapping
-- The system automatically manages buffer sizing to accommodate all windows
-
-**Example processor method:**
-```python
-def process_event(
-        self, reference_time, reference_index, time_offsets, 
-        eeg_buffer, emg_buffer, is_coil_at_target):
-    """Process general events."""
-    print(f"Event at {reference_time}")
-    # Process event-specific logic
-    return None
+'event_sample_window': [-1.5, 0.3],
 ```
 
 #### `predefined_sensory_stimuli` (list, optional)
@@ -217,19 +142,59 @@ EMG sample data. Shape: `(num_samples, num_emg_channels)`
 #### `is_coil_at_target` (bool)
 Whether the coil is currently positioned at the target location (for neuronavigation systems).
 
+#### `stage_name` (str)
+Current protocol stage name from the experiment coordinator.
+
+#### `trial_in_stage` (int)
+Total successful trials in session.
+
 #### `is_warm_up` (bool)
 `True` when this call is a warm-up round with dummy data. Skip internal state updates in this case; return values are ignored.
+During warm-up calls, `stage_name` is an empty string (`""`).
 
 **Return Value:**
 
 The `process_periodic()` method can return a dictionary with the following optional keys:
 
-#### `timed_trigger` (float)
-Schedule a trigger pulse at specified time (seconds). Uses LabJack T4 for triggering external devices like commercial TMS systems.
+#### `trigger_offset` (float)
+Schedule a trigger pulse using an offset in seconds relative to `reference_time`. Uses LabJack T4 for triggering external devices like commercial TMS systems. Only allowed from `process_periodic()` — returning this from pulse or event processors will cause an error.
 
 **Example:**
 ```python
-return {'timed_trigger': reference_time + 0.005}  # Trigger after 5ms
+return {'trigger_offset': 0.005}  # Trigger 5ms after reference_time
+```
+
+#### `targeted_pulses` (list)
+Publish targeted pulse requests to `/mtms/targeted_pulses` for external stimulation software.
+Do not return `trigger_offset` and `targeted_pulses` in the same result.
+
+Each list item must be a dictionary with:
+- `time_offset` (float): Pulse time as an offset in seconds relative to `reference_time`
+- `displacement_x` (float): X-coordinate in millimeters
+- `displacement_y` (float): Y-coordinate in millimeters
+- `rotation_angle` (float): Rotation angle in degrees
+- `intensity` (float): Intensity in V/m
+
+**Example:**
+```python
+return {
+    'targeted_pulses': [
+        {
+            'time_offset': 0.010,
+            'displacement_x': 0.0,
+            'displacement_y': 0.0,
+            'rotation_angle': 0.0,
+            'intensity': 30.0,
+        },
+        {
+            'time_offset': 0.060,
+            'displacement_x': 0.0,
+            'displacement_y': 0.0,
+            'rotation_angle': 0.0,
+            'intensity': 20.0,
+        },
+    ]
+}
 ```
 
 #### `sensory_stimuli` (list)
@@ -252,53 +217,135 @@ return {
 }
 ```
 
-### Event Processor Methods
+#### `events` (list)
+Dynamically schedule new events by returning a list of event times (in seconds, relative to session start). These are added to the same event queue as `predefined_events` and will trigger `process_event()` when reached.
 
-Event processor methods (`process_pulse` and `process_event`) are called when events occur (configured via `pulse_processor` and `event_processor`). Each has the same signature as `process_periodic()` except without `is_warm_up` (they are never called during warm-up).
+**Example:**
+```python
+return {
+    'events': [reference_time + 5.0, reference_time + 10.0]
+}
+```
+
+#### `coil_target` (str)
+Direct the neuronavigation system to a named coil target.
+
+**Example:**
+```python
+return {
+    'coil_target': 'target_1'
+}
+```
+
+### `process_pulse(...)`
+
+Called when a pulse event occurs, if the method is defined on the `Decider` class. Same signature as `process_periodic()` except without `is_warm_up` (never called during warm-up).
+
+**Return Value:**
+
+May return `None` or a dictionary with `sensory_stimuli`, `events`, `coil_target` (same format as `process_periodic()`), and optionally:
+
+#### `trial_invalid` (bool, optional)
+Mark the current trial as invalid (e.g. artifact, failed quality check). Defaults to `false` if omitted. When `true`, the experiment coordinator does not advance the stage trial counter; the attempt is retried. Stages may set `max_failures` in the protocol to cap how many invalid trials are allowed before the stage ends (see protocols README).
 
 **Example:**
 ```python
 def process_pulse(
         self, reference_time, reference_index, time_offsets,
-        eeg_buffer, emg_buffer, is_coil_at_target):
+        eeg_buffer, emg_buffer, is_coil_at_target, stage_name, trial_in_stage):
     """Process pulse events."""
-    print(f"Pulse event at {reference_time}")
-    # Process event-specific logic
-    return {'sensory_stimuli': [...]}  # Or None
-
-def process_event(
-        self, reference_time, reference_index, time_offsets,
-        eeg_buffer, emg_buffer, is_coil_at_target):
-    """Process general events."""
-    print(f"Event at {reference_time}")
-    # Process event-specific logic
+    if self.has_artifact(eeg_buffer):
+        return {'trial_invalid': True}
     return None
 ```
 
-**Processor naming:** Processor method names are arbitrary - they are explicitly mapped in the configuration via `pulse_processor` and `event_processor` keys.
+### `process_event(...)`
+
+Called when a general event occurs (from `predefined_events` or dynamically scheduled events), if the method is defined on the `Decider` class. Same signature as `process_periodic()` except without `is_warm_up` (never called during warm-up).
+
+**Example:**
+```python
+def process_event(
+        self, reference_time, reference_index, time_offsets,
+        eeg_buffer, emg_buffer, is_coil_at_target, stage_name, trial_in_stage):
+    """Process general events."""
+    print(f"Event at {reference_time}")
+    return None
+```
 
 **Example Timeline:**
 ```
-With periodic_processing_interval=3.0 and first_periodic_processing_at=1.0:
-- 1.0s: Periodic processing scheduled, process_periodic() called
-- 2.0s: Pulse event occurs, process_pulse() called (not process_periodic())
-- 4.0s: Periodic processing scheduled, process_periodic() called
-- 5.0s: General event occurs, process_event() called (not process_periodic())
-- 7.0s: Periodic processing scheduled, process_periodic() called
+With periodic_processing_interval=3.0:
+- 3.0s: Periodic processing scheduled, process_periodic() called
+- 4.0s: Pulse event occurs, process_pulse() called (not process_periodic())
+- 6.0s: Periodic processing scheduled, process_periodic() called
+- 7.0s: General event occurs, process_event() called (not process_periodic())
+- 9.0s: Periodic processing scheduled, process_periodic() called
 ```
 
-In this example, even though events occurred at 2.0s and 5.0s, the periodic processing schedule (1.0s, 4.0s, 7.0s, ...) remains consistent and unaffected.
+In this example, even though events occurred at 4.0s and 7.0s, the periodic processing schedule (3.0s, 6.0s, 9.0s, ...) remains consistent and unaffected.
+
+### `process_predetermined(reference_time, stage_name, trial, trial_type)`
+
+Called once per **predetermined** trial (protocol stages with `timing: predetermined`) when the trial counter advances. The method must return the trigger schedule for that trial upfront; the pipeline then schedules the trigger accordingly without waiting for the next periodic cycle.
+
+Not called during warm-up rounds.
+
+**Parameters:**
+
+#### `reference_time` (float)
+Current sample time in seconds since recording start. Use this as the base time when computing the trigger offset.
+
+#### `stage_name` (str)
+Name of the current protocol stage.
+
+#### `trial` (int)
+Zero-based index of the current trial within the stage.
+
+#### `trial_type` (str)
+The `type` string from the protocol entry that owns this trial (e.g. `"low_iti"`, `"open_loop_fast"`). An empty string if no `type` was specified in the protocol.
+
+**Return value:** Same format as `process_periodic()` — a dictionary with `trigger_offset` or `targeted_pulses`. Returning `None` skips the trial.
+
+**Example:**
+```python
+def process_predetermined(
+        self, reference_time: float, stage_name: str, trial: int, trial_type: str) -> dict[str, Any] | None:
+    if trial_type == 'low_iti':
+        iti = self.rng.uniform(3.0, 5.0)
+    elif trial_type == 'high_iti':
+        iti = self.rng.uniform(5.0, 7.0)
+    else:
+        assert False, f"Unknown trial type: {trial_type}"
+
+    return {'trigger_offset': iti}
+```
 
 ## Example Workflows
+
+### Predetermined Trial Timing
+```python
+def get_configuration(self):
+    return {
+        'sample_window': [-1.0, 0.0],
+        'warm_up_rounds': 2,
+    }
+
+def process_predetermined(
+        self, reference_time: float, stage_name: str, trial: int, trial_type: str):
+    """Called once per predetermined trial to schedule its trigger upfront."""
+    iti = self.rng.uniform(3.0, 5.0)
+    return {'trigger_offset': iti}
+```
+
+For a complete example, see `example_predetermined.py`.
 
 ### Continuous Monitoring
 ```python
 def get_configuration(self):
     return {
         'sample_window': [-0.100, 0.0],  # Last 100 ms
-        'periodic_processing_enabled': True,
         'periodic_processing_interval': 0.001,  # Every sample (1ms at 1kHz)
-        'pulse_lockout_duration': 0.0,
     }
 ```
 
@@ -307,10 +354,14 @@ def get_configuration(self):
 def get_configuration(self):
     return {
         'sample_window': [-0.500, 0.0],
-        'periodic_processing_enabled': False,  # No periodic processing
+        'periodic_processing_interval': 10.0,  # Infrequent periodic processing
         'predefined_events': [10.0],  # Event at 10 seconds
-        'event_processor': self.handle_trial_start,
     }
+
+def process_event(self, reference_time, reference_index, time_offsets,
+        eeg_buffer, emg_buffer, is_coil_at_target, stage_name, trial_in_stage):
+    """Handle trial start event."""
+    # ...
 ```
 
 ### Regular Interval Processing
@@ -318,9 +369,7 @@ def get_configuration(self):
 def get_configuration(self):
     return {
         'sample_window': [-1.000, 0.0],  # Last second
-        'periodic_processing_enabled': True,
-        'periodic_processing_interval': 0.1,  # 10 times per second
-        'pulse_lockout_duration': 2.0,
+        # periodic_processing_interval defaults to 0.1 (10 times per second)
     }
 ```
 
@@ -361,7 +410,7 @@ For a complete example demonstrating both predefined and dynamic sensory stimuli
 ```python
 def process_periodic(
         self, reference_time, reference_index, time_offsets,
-        eeg_buffer, emg_buffer, is_coil_at_target, is_warm_up):
+        eeg_buffer, emg_buffer, is_coil_at_target, stage_name, trial_in_stage, is_warm_up):
     # Generate stimuli based on current time or data
     return {
         'sensory_stimuli': [
@@ -395,7 +444,7 @@ def get_configuration(self) -> dict[str, Any]:
     return {
         'sample_window': [-1.0, 0.0],
         'warm_up_rounds': 2,  # Recommended: 2-3 rounds
-        # ... other configuration ...
+        # periodic_processing_interval defaults to 0.1 s if omitted
     }
 ```
 
@@ -422,7 +471,7 @@ If your decider maintains internal state that depends on real EEG/EMG data patte
 ```python
 def process_periodic(
         self, reference_time, reference_index, time_offsets,
-        eeg_buffer, emg_buffer, is_coil_at_target, is_warm_up):
+        eeg_buffer, emg_buffer, is_coil_at_target, stage_name, trial_in_stage, is_warm_up):
     
     # Your processing logic here...
     processed_data = self.analyze_eeg(eeg_buffer)

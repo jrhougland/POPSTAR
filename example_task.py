@@ -7,7 +7,7 @@ import numpy as np
 
 
 class Decider:
-    def __init__(self, subject_id: int, num_eeg_channels: int, num_emg_channels: int, sampling_frequency: int):
+    def __init__(self, subject_id: str, num_eeg_channels: int, num_emg_channels: int, sampling_frequency: int):
         self.subject_id = subject_id
         self.num_eeg_channels = num_eeg_channels
         self.num_emg_channels = num_emg_channels
@@ -31,10 +31,6 @@ class Decider:
             # 'event_sample_window': [-1.5, 0.3],
         }
 
-    def prepare_trial(self, start_time: float, stage_name: str, trial_in_stage: int) -> None:
-        """Called once at the beginning of a new trial."""
-        print(f"Preparing trial {trial_in_stage} in stage '{stage_name}' at time {start_time:.3f}.")
-
     def process_periodic(
             self, reference_time: float, reference_index: int, time_offsets: np.ndarray,
             eeg_buffer: np.ndarray, emg_buffer: np.ndarray,
@@ -54,7 +50,7 @@ class Decider:
             self, reference_time: float, reference_index: int, time_offsets: np.ndarray,
             eeg_buffer: np.ndarray, emg_buffer: np.ndarray, is_coil_at_target: bool, stage_name: str, trial_in_stage: int) -> dict[str, Any] | None:
         """Process event."""
-        print(f"Event received at time {reference_time:.3f}.")
+        print(f"Event received at time {reference_time}.")
         # This example doesn't process events, just log them
         return None
 
@@ -62,6 +58,12 @@ class Decider:
             self, reference_time: float, reference_index: int, time_offsets: np.ndarray,
             eeg_buffer: np.ndarray, emg_buffer: np.ndarray, is_coil_at_target: bool, stage_name: str, trial_in_stage: int) -> dict[str, Any] | None:
         """Process pulse event."""
-        print(f"Pulse event received at time {reference_time:.3f}.")
+        print(f"Pulse event received at time {reference_time}.")
         # Add your pulse event handling logic here
         return None
+
+    def process_task(self, task_name: str) -> None:
+        """Process task."""
+        print(f"Task {task_name} started.")
+        time.sleep(10)  # Simulate task processing time (e.g. training a classifier)
+        print(f"Task {task_name} finished.")

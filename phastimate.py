@@ -48,7 +48,7 @@ DEFAULT_AR_MODEL_ORDER = 15
 DEFAULT_DOWNSAMPLE_RATIO = 10
 
 # Processing timing constants
-DEFAULT_PROCESSING_INTERVAL_SECONDS = 0.1
+
 DEFAULT_BUFFER_SIZE_SECONDS = 1.0
 
 class Decider:
@@ -79,7 +79,6 @@ class Decider:
         self.downsample_ratio = DEFAULT_DOWNSAMPLE_RATIO
 
         # Processing timing parameters
-        self.periodic_processing_interval = DEFAULT_PROCESSING_INTERVAL_SECONDS
         self.buffer_size_seconds = DEFAULT_BUFFER_SIZE_SECONDS
 
         # Filter coefficients
@@ -103,19 +102,14 @@ class Decider:
         """
         return {
             # Data configuration
-            'sample_window': [self.buffer_size_seconds, 0.0],
+            'sample_window': [-self.buffer_size_seconds, 0.0],
             'warm_up_rounds': 2,
-
-            # Periodic processing
-            'periodic_processing_enabled': True,
-            'periodic_processing_interval': 0.1,  # Process every 0.1 seconds
-            'pulse_lockout_duration': 2.0,  # Prevent periodic processing for 2.0 seconds after pulse
         }
 
     def process_periodic(
-            self, reference_time: float, reference_index: int, time_offsets: np.ndarray, 
+            self, reference_time: float, reference_index: int, time_offsets: np.ndarray,
             eeg_buffer: np.ndarray, emg_buffer: np.ndarray,
-            is_coil_at_target: bool, is_warm_up: bool) -> dict[str, Any] | None:
+            is_coil_at_target: bool, stage_name: str, trial_in_stage: int, is_warm_up: bool) -> dict[str, Any] | None:
         """
         Process the EEG data to estimate phase and schedule a trigger periodically.
 
@@ -129,7 +123,7 @@ class Decider:
             is_warm_up: True when this call is a warm-up round with dummy data; skip state updates if needed.
 
         Returns:
-            Dictionary with 'timed_trigger' key and execution time, or None if no trigger scheduled
+            Dictionary with 'trigger_offset' key and execution time, or None if no trigger scheduled
         """
         # Extract C3 channel with common average reference
         c3_referenced_data = self._extract_c3_referenced_data(eeg_buffer)
@@ -234,14 +228,13 @@ class Decider:
             print(f'[{reference_time:.1f}s] Not triggering: Δφ = {min_phase_difference:.1f} rad')
             return None
 
-        # Calculate trigger execution time
+        # Calculate trigger timing offset relative to reference sample time
         time_offset_seconds = (optimal_sample_index * self.downsample_ratio) / self.sampling_frequency
-        execution_time = reference_time + time_offset_seconds
         time_offset_ms = time_offset_seconds * 1000
 
         print(f'[{reference_time:.1f}s] Triggering at +{time_offset_ms:.0f}ms')
 
-        return {'timed_trigger': execution_time}
+        return {'trigger_offset': time_offset_seconds}
 
     def phastimate(self, data: np.ndarray, filter_b: np.ndarray, filter_a: list[float], 
                    edge_samples: int, ar_order: int, hilbert_window_size: int,
