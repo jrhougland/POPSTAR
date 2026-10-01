@@ -18,6 +18,7 @@ import csv
 import os
 import time
 import socket
+import subprocess
 import random
 from collections import deque
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -78,9 +79,10 @@ EPSILON_DECAY = 0.002 #800 trials total - exploration about halfway
 SEQUENCE_LENGTH = 2
 REWARD_CAP = 10000.0
 
-# Load MATLAB filter coefficients
-mat_data = loadmat('data/filter_coeffs.mat')
-BANDPASS_FILTER_COEFFICIENTS = np.array(mat_data['coeffs'].flatten())
+# --- Bandpass filter ---
+# True: git pull, then load data/bpfilter_sub-XXX.mat pushed by 01_get_filt_coeffs.py on the control PC
+# False: default MATLAB filter in data/filter_coeffs.mat
+SUBJECT_FILTER = True
 
 RANDOM_PHASES_PATH = "data/random_phases.csv"
 
@@ -324,7 +326,18 @@ class Decider:
         print(f"Buffer size in samples: {self.buffer_size_samples}")
 
         # Filter
-        self.bandpass_filter_coefficients = BANDPASS_FILTER_COEFFICIENTS
+        if SUBJECT_FILTER:
+            results = subprocess.run('git pull', shell=True, capture_output=True, text=True)
+            print(results.stdout)
+            if results.returncode != 0:
+                print(results.stderr)
+            else:
+                print("Git pull successful")
+            mat_data = loadmat(f'data/bpfilter_sub-{subject_id:03d}.mat')
+            self.bandpass_filter_coefficients = np.array(mat_data['coefficients'].flatten())
+        else:
+            mat_data = loadmat('data/filter_coeffs.mat')
+            self.bandpass_filter_coefficients = np.array(mat_data['coeffs'].flatten())
 
         # NEW!!!!!
         self._action_counts = np.zeros(N_ACTIONS + 1)  # index 1-8

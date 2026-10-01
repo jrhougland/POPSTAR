@@ -1,0 +1,8 @@
+{
+    "sub_id": "sub-999",
+    "sess_id": 1,
+    "data_root": "C:\\ProgramData\\Bittium Biosignals Ltd\\NeurOne64\\SessionData\\NeurOneUser\\",
+    "data_save": "C:\\Users\\Eric James McDermott\\Desktop\\Popstar\\data",
+    "subject_filter": true,
+    "coeffs_path": "C:\\Users\\Eric James McDermott\\Desktop\\Popstar\\data\\bpfilter_default.mat"
+}
