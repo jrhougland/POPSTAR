@@ -18,6 +18,7 @@ import csv
 import os
 import time
 import socket
+import subprocess
 import random
 from collections import deque
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -60,8 +61,10 @@ N_ACTIONS = 8
 ACTION_TO_PHASE = {k: (k - 5) * 0.25 * np.pi for k in range(1, N_ACTIONS + 1)}
 
 # --- Session structure ---
-N_RL_TRIALS = 800   # NOTE: This must match popstar.yaml protocol definition!
-N_TEST_TRIALS = 200  # NOTE: This must match popstar.yaml protocol definition!
+# The protocol (popstar.yaml) defines how many trials each stage actually has; these
+# values are used for the RL 'done' flag and for printouts, so they should match it.
+N_RL_TRIALS = 800
+N_TEST_TRIALS = 200
 
 # --- DQN hyper-parameters (mirrors MATLAB agentOptions) ---
 REPLAY_BUFFER_SIZE = 100    #was 50
@@ -76,9 +79,10 @@ EPSILON_DECAY = 0.002 #800 trials total - exploration about halfway
 SEQUENCE_LENGTH = 2
 REWARD_CAP = 10000.0
 
-# Load MATLAB filter coefficients
-mat_data = loadmat('data/filter_coeffs.mat')
-BANDPASS_FILTER_COEFFICIENTS = np.array(mat_data['coeffs'].flatten())
+# --- Bandpass filter ---
+# True: git pull, then load data/bpfilter_sub-XXX.mat pushed by 01_get_filt_coeffs.py on the control PC
+# False: default MATLAB filter in data/filter_coeffs.mat
+SUBJECT_FILTER = True
 
 RANDOM_PHASES_PATH = "data/random_phases.csv"
 
@@ -322,7 +326,18 @@ class Decider:
         print(f"Buffer size in samples: {self.buffer_size_samples}")
 
         # Filter
-        self.bandpass_filter_coefficients = BANDPASS_FILTER_COEFFICIENTS
+        if SUBJECT_FILTER:
+            results = subprocess.run('git pull', shell=True, capture_output=True, text=True)
+            print(results.stdout)
+            if results.returncode != 0:
+                print(results.stderr)
+            else:
+                print("Git pull successful")
+            mat_data = loadmat(f'data/bpfilter_sub-{subject_id:03d}.mat')
+            self.bandpass_filter_coefficients = np.array(mat_data['coefficients'].flatten())
+        else:
+            mat_data = loadmat('data/filter_coeffs.mat')
+            self.bandpass_filter_coefficients = np.array(mat_data['coeffs'].flatten())
 
         # NEW!!!!!
         self._action_counts = np.zeros(N_ACTIONS + 1)  # index 1-8
@@ -368,9 +383,14 @@ class Decider:
 
         print(self._blocks)
 
+        # Block state is bound to the protocol stages reported by the experiment
+        # coordinator: the Nth stage of the protocol drives the Nth block here. The
+        # coordinator is also the authority on the trial number within a stage, so the
+        # decider never counts trials itself (a scheduled trigger that never produces a
+        # pulse is a failed trial and is retried by the coordinator).
         self._block_idx = 0
-        self._block_trials = 0   # triggers delivered in the current block
-        self._total_trials = 0   # triggers delivered across all blocks
+        self._current_stage_name: Optional[str] = None
+        self._stages_warned_about_trial_count: set = set()
 
         # RL components 
         self._agent = DQNAgent(self.device)
@@ -396,7 +416,6 @@ class Decider:
 
         # Random phases
         self._random_phases = self._load_random_phases(RANDOM_PHASES_PATH)
-        self._random_phase_idx = 0
 
         self.earliest_next_pulse_time = None
 
@@ -498,27 +517,39 @@ class Decider:
             eeg_buffer: np.ndarray, emg_buffer: np.ndarray,
             is_coil_at_target: bool, stage_name: str, trial_in_stage: int, is_warm_up: bool) -> dict[str, Any] | None:
         """
-        Called every `processing_interval_seconds`.
+        Called every `processing_interval_seconds` while a trial is active.
         Steps:
-          1. Warm-up guard
-          2. Send UDP start marker (first call only)
-          3. Drain MEP queue → complete pending RL experience → train
-          4. Advance block if needed
-          5. Run Phastimate
-          6. Select target phase (RL / trough / random)
-          7. Find trigger timing
-          8. If trigger found, log and store pending RL experience
+          1. Respect the decider's own minimum inter-pulse interval
+          2. Sync block state with the stage reported by the coordinator
+          3. Run Phastimate
+          4. Select target phase (RL / best RL / trough / random)
+          5. Find trigger timing
+          6. If trigger found, log and store pending RL experience
+
+        Note that a trigger returned here is only an *attempt*: if it never results in a
+        processed pulse, the coordinator retries the same trial, and this method is called
+        again with the same `trial_in_stage`. The log therefore contains one row per
+        attempt; only the successful attempt of a trial gets an MEP.
         """
         if self.earliest_next_pulse_time is not None and reference_time < self.earliest_next_pulse_time:
-            return
-        
-        print("Stage name " + stage_name)
-        # Guard: session is over
-        if self._block_idx >= len(self._blocks):
             return None
-        # 1. Get current block
+
+        # 1. Sync with the coordinator's stage; each stage maps to one block.
+        if stage_name != self._current_stage_name:
+            if not self._start_block_for_stage(stage_name):
+                return None
+
         current_block = self._blocks[self._block_idx]
         mode = current_block["mode"]
+
+        if trial_in_stage >= current_block["n_trials"] and stage_name not in self._stages_warned_about_trial_count:
+            self._stages_warned_about_trial_count.add(stage_name)
+            print(
+                f"[Decider] Warning: stage '{stage_name}' is at trial {trial_in_stage + 1}, "
+                f"beyond the {current_block['n_trials']} trials configured for block "
+                f"'{current_block['name']}'. The protocol defines the number of trials; "
+                f"check that the decider constants match the protocol."
+            )
 
         # 2. Run Phastimate
         estimated_phases = self._run_phastimate(eeg_buffer)
@@ -526,7 +557,7 @@ class Decider:
             return None
 
         # 3. Select target phase
-        target_phase = self._select_target_phase(mode, estimated_phases)
+        target_phase = self._select_target_phase(mode, estimated_phases, trial_in_stage)
         if target_phase is None:
             return None
 
@@ -537,16 +568,16 @@ class Decider:
         if trigger_result is None:
             return None
 
-        # 5. Log and store pending RL experience
-        self._block_trials  += 1
-        self._total_trials  += 1
+        # 5. Log the attempt; the pending RL experience was stored by _select_target_phase.
+        block_trial = trial_in_stage + 1
+        total_trial = self._trials_before_current_block() + block_trial
 
         self._log.append({
             "block":        self._block_idx,
             "block_name":   current_block["name"],
             "mode":         mode,
-            "trial":        self._block_trials,
-            "total_trial":  self._total_trials,
+            "trial":        block_trial,
+            "total_trial":  total_trial,
             "target_phase": target_phase,
             "trigger_time": trigger_result["trigger_offset"] + reference_time,
             "mep":          None,   # filled in when MEP arrives
@@ -556,9 +587,9 @@ class Decider:
         })
 
         print(
-            f"[Decider] Block={self._block_idx}({mode}) "
-            f"trial={self._block_trials}/{current_block['n_trials']} "
-            f"(global {self._total_trials}) | "
+            f"[Decider] Block={self._block_idx}({mode}) stage='{stage_name}' "
+            f"trial={block_trial}/{current_block['n_trials']} "
+            f"(global {total_trial}) | "
             f"target={np.degrees(target_phase):.1f}° | "
             f"trigger in {trigger_result['trigger_offset']:.3f}s",
             flush=True,
@@ -686,17 +717,18 @@ class Decider:
     #  Phase selection                                           #
     # ------------------------------------------------------------------ #
 
-    def _select_target_phase(self, mode: str, estimated_phases: np.ndarray,) -> Optional[float]:
+    def _select_target_phase(self, mode: str, estimated_phases: np.ndarray, trial_in_stage: int) -> Optional[float]:
         """
         Return the target phase (radians) for this trial.
 
         Trough : always π
-        Random : next value from the CSV list
+        Random : the value the CSV assigns to this trial (indexed by trial number, so a
+                 retried trial repeats the same planned phase)
         RL     : agent selects one of 8 discrete phases based on the
                  current EEG phase and the most recent MEP amplitude.
                  The (obs, action, obs_window_snapshot) triple is stored
                  as pending so the reward can be assigned after the MEP
-                 arrives via receive_mep().
+                 arrives via process_pulse().
         """
         if mode == "trough":
             return np.pi
@@ -705,10 +737,7 @@ class Decider:
             return self._best_rl_phase
 
         if mode == "random":
-            idx   = self._random_phase_idx % len(self._random_phases)
-            phase = float(self._random_phases[idx])
-            self._random_phase_idx += 1
-            return phase
+            return float(self._random_phases[trial_in_stage % len(self._random_phases)])
 
         # --- RL mode ---
         # Derive current instantaneous phase from the last Hilbert window
@@ -815,9 +844,9 @@ class Decider:
                 entry["earliest_next_pulse_time"] = self.earliest_next_pulse_time
                 break
 
-        # RL training step (only in block 0, and only if a pending experience exists)
+        # RL training step (only in the RL block, and only if a pending experience exists)
         if (
-            self._block_idx == 0
+            self._blocks[self._block_idx]["mode"] == "rl"
             and self._pending_obs    is not None
             and self._pending_action is not None
             and self._pending_obs_seq is not None
@@ -835,7 +864,8 @@ class Decider:
             next_window.append(next_obs)
             next_obs_seq = np.array(list(next_window))
 
-            done = (self._block_trials >= self._blocks[0]["n_trials"])
+            # This pulse completes trial `trial_in_stage` (0-based) of the RL stage.
+            done = (trial_in_stage + 1 >= self._blocks[self._block_idx]["n_trials"])
 
             loss = self._agent.store_and_train(
                 obs_seq = self._pending_obs_seq,
@@ -861,11 +891,6 @@ class Decider:
         self._pending_obs_seq = None
         
         print(f"Pulse processed in {time.time() - start_time:.3f} seconds")
-
-        # Check if block is complete
-        current_block = self._blocks[self._block_idx]
-        if self._block_trials >= current_block["n_trials"]:
-            self._advance_block()
 
 
     def _compute_reward(self, current_mep: float) -> float:
@@ -897,23 +922,38 @@ class Decider:
     #  Internal: block & episode management                               #
     # ------------------------------------------------------------------ #
 
-    def _advance_block(self) -> bool:
-        """Move to the next block. Returns False if the session is over."""
+    def _trials_before_current_block(self) -> int:
+        """Number of trials in the blocks preceding the current one."""
+        return sum(block["n_trials"] for block in self._blocks[:self._block_idx])
+
+    def _start_block_for_stage(self, stage_name: str) -> bool:
+        """
+        Bind block state to a protocol stage reported by the coordinator.
+
+        The first stage seen starts block 0; every later stage advances one block.
+        Returns False if the protocol has more stages than the decider has blocks.
+
+        Assumes stage names in the protocol are unique, which they are in popstar.yaml
+        (phase_1, phase_2, phase_3).
+        """
+        previous_stage_name = self._current_stage_name
+        self._current_stage_name = stage_name
+
+        if previous_stage_name is None:
+            print(
+                f"\n[Decider] ===== Starting block: {self._blocks[0]['name']} "
+                f"(stage '{stage_name}') =====\n"
+            )
+            return True
+
+        return self._advance_block(stage_name)
+
+    def _advance_block(self, stage_name: str) -> bool:
+        """Move to the block for the newly started stage. Returns False if out of blocks."""
         self._save_all()
-        self._block_idx += 1
 
-        if self._block_idx >= len(self._blocks):
-            print("[Decider] All blocks completed — session finished.")
-            return False
-
-        self._block_trials     = 0
-        self._mep_history      = []
-        self._random_phase_idx = 0
-        self._pending_obs      = None
-        self._pending_action   = None
-        self._pending_obs_seq  = None
-
-        if self._blocks[self._block_idx - 1]["mode"] == "rl":
+        # Freeze the best RL phase before leaving the RL block.
+        if self._blocks[self._block_idx]["mode"] == "rl":
             avg_rewards = np.divide(
                 self._action_rewards[1:],
                 self._action_counts[1:],
@@ -924,10 +964,27 @@ class Decider:
             self._best_rl_phase = ACTION_TO_PHASE[best_action]
             print(f"[Decider] Best RL phase: action={best_action}, phase={np.degrees(self._best_rl_phase):.1f}°")
 
+        self._block_idx += 1
+
+        if self._block_idx >= len(self._blocks):
+            print(
+                f"[Decider] Stage '{stage_name}' started but all blocks are done — "
+                f"the protocol has more stages than the decider has blocks."
+            )
+            return False
+
+        self._mep_history      = []
+        self._pending_obs      = None
+        self._pending_action   = None
+        self._pending_obs_seq  = None
+
         if self._blocks[self._block_idx]["mode"] == "rl":
             self._agent.reset_episode()
 
-        print(f"\n[Decider] ===== Starting block: {self._blocks[self._block_idx]['name']} =====\n")
+        print(
+            f"\n[Decider] ===== Starting block: {self._blocks[self._block_idx]['name']} "
+            f"(stage '{stage_name}') =====\n"
+        )
         return True
 
     def _check_episode_boundary(self) -> None:

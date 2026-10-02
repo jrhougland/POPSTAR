@@ -1,5 +1,5 @@
 cd(root);
-addpath(genpath('toolboxes'));
+addpath(fullfile(root, 'eeglab'));
 
 eeglab('nogui');
 
