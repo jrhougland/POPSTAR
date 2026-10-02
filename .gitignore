@@ -1,3 +1,4 @@
 __pycache__
 eeglab
-data/sub*
+data/
+!data/bpfilter*

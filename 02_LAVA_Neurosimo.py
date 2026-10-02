@@ -32,12 +32,11 @@ REFERENCE_CHANNEL_INDICES = [20, 22, 24, 26]  # Reference channels for C3, again
 REFERENCE_WEIGHT = 0.25 
 
 # Phase estimation constants
-print(os.getcwd())
-REPO_PATH = '../POPSTAR'  # Path to the Git repository for filter coefficient updates
+REPO_PATH = os.path.dirname(os.path.abspath(__file__))  # This directory is the POPSTAR Git repository (for filter coefficient updates)
 DATA_PATH = f'{REPO_PATH}/data'
 
 # Phase schedule: trough (pi) and peak (0) only, shuffled within balanced blocks
-N_TRIALS = 100
+N_TRIALS = 148 # MUST BE DIVISIBLE BY len(PHASE_CONDITIONS) * BLOCK_MULTIPLIER
 PHASE_CONDITIONS = [0, np.pi]
 BLOCK_MULTIPLIER = 2  # each block has 4 trials (2 peak, 2 trough)
 
@@ -185,7 +184,6 @@ class Decider:
         num_blocks = N_TRIALS // len(block)
 
         phases_array = np.concatenate([rng.permutation(block) for _ in range(num_blocks)])
-
         with open(csv_path, 'w', newline='') as f:
             writer = csv.writer(f)
             for phase in phases_array:

@@ -21,7 +21,7 @@ with open("settings.json", "r") as f:
 sub_id = settings["sub_id"]
 sess_id = settings["sess_id"]
 data_root = Path(settings["data_root"])
-sess_root = data_root / f"LAVA_{sub_id[-3:]}"
+sess_root = data_root / f"POPSTAR_{sub_id[-3:]}"
 latest_session = max(
     (path for path in sess_root.iterdir() if path.is_dir()),
     key=lambda path: path.stat().st_mtime,
