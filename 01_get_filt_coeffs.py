@@ -1,11 +1,11 @@
 # %%
 # packages and paths
-import subprocess, os
+import os
+import subprocess
 from json import dump, load
 from pathlib import Path
 
 import mne
-import numpy as np
 from scipy.io import savemat
 from scipy.signal import firwin
 from spectrum_analysis import compute_peak_bands, parameterize_spectrum
@@ -83,9 +83,9 @@ if not rs_file.exists():
 # c3 hjorth filter
 pre_rs = mne.io.read_raw_eeglab(str(rs_file), preload=True)
 
-pre_rs.crop(tmin=30, tmax=630)  # take only the first 10 minutes of data
+pre_rs.crop(tmin=5, tmax=305)  # take only the first 5 minutes of data
 center = "C3"
-neighbors = ["FC3", "CP3", "C1", "C5"]
+neighbors = ["FC1", "CP1", "FC5", "CP5"]
 
 # get the data
 c3 = pre_rs.get_data(picks=center)
@@ -101,7 +101,13 @@ raw_c3_hjorth = mne.io.RawArray(c3_hjorth, info).filter(1, 60, fir_design="firwi
 
 raw_c3_hjorth.resample(pre_rs.info["sfreq"] / dec)
 
-spectrum = raw_c3_hjorth.compute_psd(fmin=1, fmax=60)
+n_per_seg = int(4 * raw_c3_hjorth.info["sfreq"])  # 4 s windows
+n_fft = 4096
+spectrum = raw_c3_hjorth.compute_psd(
+    fmin=1, fmax=60, n_fft=n_fft, n_overlap=n_per_seg // 2, n_per_seg=n_per_seg
+)
+
+# spectrum = raw_c3_hjorth.compute_psd(fmin=1, fmax=60)
 
 freqs = spectrum.freqs
 psd = spectrum.get_data()
