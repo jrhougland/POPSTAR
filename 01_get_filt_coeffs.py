@@ -101,6 +101,15 @@ raw_c3_hjorth = mne.io.RawArray(c3_hjorth, info).filter(1, 60, fir_design="firwi
 
 raw_c3_hjorth.resample(pre_rs.info["sfreq"] / dec)
 
+n_per_seg = int(4 * raw_c3_hjorth.info["sfreq"])  # 4 s windows
+n_fft = 4096
+spectrum = raw_c3_hjorth.compute_psd(
+    fmin=1, fmax=60, n_fft=n_fft, n_overlap=n_per_seg // 2, n_per_seg=n_per_seg
+)
+
+freqs = spectrum.freqs
+psd = spectrum.get_data()
+
 periodic_params, aperiodic_params = parameterize_spectrum(
     [freqs, psd[0, :]],
     save_fig=repo_root / "figures" / f"{sub_id}_psd.png",
