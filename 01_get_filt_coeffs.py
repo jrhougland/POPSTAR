@@ -6,9 +6,11 @@ from json import dump, load
 from pathlib import Path
 
 import mne
+import numpy as np
 from scipy.io import savemat
 from scipy.signal import firwin
-from spectrum_analysis import compute_peak_bands, parameterize_spectrum
+
+from spectrum_analysis import parameterize_spectrum
 
 # change pwd to script directory to ensure relative paths work correctly
 pwd = Path(__file__).parent
