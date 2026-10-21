@@ -101,38 +101,49 @@ raw_c3_hjorth = mne.io.RawArray(c3_hjorth, info).filter(1, 60, fir_design="firwi
 
 raw_c3_hjorth.resample(pre_rs.info["sfreq"] / dec)
 
-n_per_seg = int(4 * raw_c3_hjorth.info["sfreq"])  # 4 s windows
-n_fft = 4096
-spectrum = raw_c3_hjorth.compute_psd(
-    fmin=1, fmax=60, n_fft=n_fft, n_overlap=n_per_seg // 2, n_per_seg=n_per_seg
-)
-
-# spectrum = raw_c3_hjorth.compute_psd(fmin=1, fmax=60)
-
-freqs = spectrum.freqs
-psd = spectrum.get_data()
-
 periodic_params, aperiodic_params = parameterize_spectrum(
-    [freqs, psd[0, :]], save_fig=psd_path, fmax=60
+    [freqs, psd[0, :]],
+    save_fig=repo_root / "figures" / f"{sub_id}_psd.png",
+    freq_range=[1, 60],
 )
 
-# compute peak bands
-# peak_index = np.argmax(
-#     [
-#         periodic_params[index][1]
-#         for index, param in enumerate(periodic_params)
-#         if param[0] < 12 and param[0] > 8
-#     ]
-# )
+# get snr peak
+lower_alpha, upper_alpha = 8, 13
+peak_snr = max(psd[0, (freqs >= lower_alpha) & (freqs <= upper_alpha)])
+peak_idx = np.where(psd[0, :] == peak_snr)[0][0]
+peak_power_log = np.log10(peak_snr)
+aperiodic_background_log = aperiodic_params[0] - aperiodic_params[1] * np.log10(
+    freqs[peak_idx]
+)
+peak_snr = 10 * (peak_power_log - aperiodic_background_log)
+print("\n" + 100 * "-")
+print(f"Peak SNR: {peak_snr:.2f} dB at {freqs[peak_idx]:.2f} Hz")
 
-# peak = periodic_params[peak_index][0]
-# print(f"peak: {peak}")
-# lower, upper = peak - 1, peak + 1
-upper, lower, _ = compute_peak_bands(periodic_params, [[8, 12, 0]])
+# compute peak bands with +/-1 fixed bandwidth
+band_peaks = [
+    param
+    for param in periodic_params
+    if param[0] < upper_alpha and param[0] > lower_alpha
+]
+if len(band_peaks) > 0:
+    peak = max(band_peaks, key=lambda x: x[1])  # get the peak with the highest power
+    peak_f = peak[0]
+else:
+    print("No peaks found in the alpha band. Using the peak SNR frequency instead.")
+    peak_f = freqs[peak_idx]
+print(f"Peak frequency: {peak_f:.2f} Hz")
+lower, upper = peak_f - 1, peak_f + 1
 
-upper, lower = upper[0], lower[0]
+# save snr
+with open(data_save / "sub_snr.csv", "a") as f:
+    f.write(
+        f"{sub_id}, Session: {sess_id}, Peak frequency: {peak_f} Hz, SNR: {peak_snr:.2f} dB\n"
+    )
 
-print(f"upper, lower: {upper}, {lower}")
+# use for fitted width instead of fixed 1 Hz bandwidth
+# upper, lower = [x[0] for x in compute_peak_bands(periodic_params, [[8, 12, 0]])[:2]]
+
+
 # design FIR filter and retrieve coefficients
 fs = raw_c3_hjorth.info["sfreq"]
 numtaps = (
