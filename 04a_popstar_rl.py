@@ -276,7 +276,7 @@ class Decider(PhastimateDecider):
         self._last_reward = 0.0
 
         # RL episode tracking
-        self._steps_per_episode = 20
+        self._steps_per_episode = 40
         self._episode_step = 0
         self._episode_num = 0
         self._episode_rewards: List[float] = []
