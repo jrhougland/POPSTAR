@@ -1,0 +1,25 @@
+{
+  "subject": "sub-001",
+  "fit_success": true,
+  "error": null,
+  "s50_pct_mso": 64.93731252816707,
+  "s50_rounded_pct_mso": 65,
+  "mep_min_uv": 2.7822804968967682e-08,
+  "mep_max_uv": 7768.280375708993,
+  "slope_k": 2.1851913563675986,
+  "s50_at_bound": false,
+  "n_trials": 40,
+  "n_rejected": 7,
+  "baseline_rms_cutoff_uv": 15.0,
+  "mep_window_s": [
+    0.025,
+    0.05
+  ],
+  "baseline_window_s": [
+    -0.1,
+    -0.01
+  ],
+  "trials_csv": "/app/projects/POPSTAR/decider/results/1/io_curve/io_curve_trials.csv",
+  "figure": "/app/projects/POPSTAR/decider/results/1/io_curve/sub-001_IO_S50_64_9.png",
+  "analysed_at": "2026-10-23T12:02:01"
+}

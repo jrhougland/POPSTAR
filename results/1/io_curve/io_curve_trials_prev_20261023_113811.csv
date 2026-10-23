@@ -1,0 +1,2 @@
+trial,stage,intensity_pct,iti,trial_start_time,target_time,pulse_time,mep_ptp_uv,baseline_rms_uv,rejected_baseline
+1,IO Curve,15,2.7580675357176427,0.0,2.7580675357176427,2.758,71.0,23.64989990876002,True
